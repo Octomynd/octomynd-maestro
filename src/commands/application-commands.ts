@@ -1430,7 +1430,7 @@ export class ApplicationCommands {
         this.recordPrepareFailure(origin, task.id, failure.details);
         throw failure;
       }
-      const bootstrap = bootstrapEmptyRepository(project.path, project.key);
+      const bootstrap = bootstrapEmptyRepository(project.path, project.key, { push: false });
       if (!bootstrap.ok) {
         const failure = conflictError(
           bootstrap.error ?? "Repository has no commits and Maestro could not create the initial one."
