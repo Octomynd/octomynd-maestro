@@ -340,12 +340,9 @@ export class ApplicationCommands {
             `Failed to clone remote repository: ${cloneResult.stderr || cloneResult.stdout || "Unknown error"}`
           );
         }
-        const bootstrap = bootstrapEmptyRepository(projectPath, key);
+        const bootstrap = bootstrapEmptyRepository(projectPath, key, { push: false });
         if (bootstrap.bootstrapped) {
-          warnings.push(
-            "Empty repository: Maestro created the initial commit (README + .gitignore)" +
-              (bootstrap.pushed ? " e publicou a branch no remoto." : ".")
-          );
+          warnings.push("Empty repository: Maestro created the initial commit (README + .gitignore) locally; no branch was published.");
           this.database.addEvent({
             source: origin.channel,
             type: "project.bootstrapped",
@@ -386,12 +383,9 @@ export class ApplicationCommands {
       if (!fs.existsSync(path.join(projectPath, ".git"))) {
         warnings.push("Path exists, but .git was not found. Future Git automation will be blocked.");
       } else {
-        const bootstrap = bootstrapEmptyRepository(projectPath, key);
+        const bootstrap = bootstrapEmptyRepository(projectPath, key, { push: false });
         if (bootstrap.bootstrapped) {
-          warnings.push(
-            "Empty repository: Maestro created the initial commit (README + .gitignore)" +
-              (bootstrap.pushed ? " e publicou a branch no remoto." : ".")
-          );
+          warnings.push("Empty repository: Maestro created the initial commit (README + .gitignore) locally; no branch was published.");
           this.database.addEvent({
             source: origin.channel,
             type: "project.bootstrapped",
