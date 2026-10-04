@@ -10,6 +10,19 @@ import { ApplicationCommandError } from "../src/commands/errors.js";
 import { FeatureGitHubGateway, FeaturePullRequestState } from "../src/features/github.js";
 
 const { bootstrapOptionsSpy } = vi.hoisted(() => ({ bootstrapOptionsSpy: vi.fn() }));
+const { gitPushCalls } = vi.hoisted(() => ({ gitPushCalls: [] as string[][] }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    spawnSync: (command: string, args: readonly string[], options?: object) => {
+      if (command === "git" && args[0] === "push") {
+        gitPushCalls.push([...args]);
+      }
+      return actual.spawnSync(command, args, options);
+    }
+  };
+});
 vi.mock("../src/git.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/git.js")>();
   return {
@@ -618,11 +631,13 @@ describe("ApplicationCommands.prepareTask on an empty repository", () => {
     const task = commands.createTask({ channel: "dashboard" }, { text: "criar app de financas", projectKey: "empty-repo" });
 
     bootstrapOptionsSpy.mockClear();
+    gitPushCalls.length = 0;
     const result = commands.prepareTask({ channel: "dashboard" }, task.id, path.join(tempDir, "worktrees"));
 
     expect(result.task.worktreePath).toBeTruthy();
     expect(hasAnyCommit(emptyDir)).toBe(true);
     expect(bootstrapOptionsSpy).toHaveBeenCalledWith({ push: false });
+    expect(gitPushCalls).toEqual([]);
     expect(spawnGit(["show-ref"], bareRemote).stdout).toBe("");
 
     const events = database.listEvents(50).filter((event) => event.type === "project.bootstrapped");
