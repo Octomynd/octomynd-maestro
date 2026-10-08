@@ -23,11 +23,20 @@ export type ProjectManifestEvidence = {
   ecosystem: ProjectEcosystem;
 };
 
+export type ProjectObservedEvidence = {
+  sourcePath: string;
+  category: "file" | "manifest" | (string & {});
+  ecosystem: ProjectEcosystem | "unknown";
+  confidence: "observed";
+};
+
 export type ProjectDiscovery = {
   root: string;
   /** Existing project files visible to Git (or all files for a non-Git folder). */
   files: string[];
   manifests: ProjectManifestEvidence[];
+  /** Directly observed inventory entries; this does not assign project roles. */
+  evidence: ProjectObservedEvidence[];
   ecosystems: ProjectEcosystem[];
   scannedDirectories: number;
   truncated: boolean;
@@ -37,10 +46,16 @@ export type ProjectDiscovery = {
 export type ProjectDiscoveryOptions = {
   maxDepth?: number;
   maxDirectories?: number;
+  /** Maximum files returned; defaults to 50,000. */
+  maxFiles?: number;
+  /** Maximum filesystem entries inspected; Git inventories count visible file entries. Defaults to 100,000. */
+  maxEntries?: number;
 };
 
 const DEFAULT_MAX_DEPTH = 24;
 const DEFAULT_MAX_DIRECTORIES = 20_000;
+const DEFAULT_MAX_FILES = 50_000;
+const DEFAULT_MAX_ENTRIES = 100_000;
 const IGNORED_DIRECTORIES = new Set([
   ".git", ".maestro", ".next", ".nuxt", ".pytest_cache", ".venv", ".vite",
   ".yarn", "__pycache__", "bin", "build", "coverage", "dist", "node_modules",
@@ -56,16 +71,20 @@ export function discoverProject(rootPath: string, options: ProjectDiscoveryOptio
   const root = path.resolve(rootPath);
   const maxDepth = positiveInteger(options.maxDepth, DEFAULT_MAX_DEPTH);
   const maxDirectories = positiveInteger(options.maxDirectories, DEFAULT_MAX_DIRECTORIES);
+  const maxFiles = positiveInteger(options.maxFiles, DEFAULT_MAX_FILES);
+  const maxEntries = positiveInteger(options.maxEntries, DEFAULT_MAX_ENTRIES);
   const manifests: ProjectManifestEvidence[] = [];
   const warnings: string[] = [];
-  const gitFiles = listGitVisibleFiles(root, maxDepth, maxDirectories);
+  const gitFiles = listGitVisibleFiles(root, maxDepth, maxDirectories, maxFiles, maxEntries);
   const inventory = gitFiles
     ? { files: gitFiles.files, scannedDirectories: gitFiles.scannedDirectories, truncated: gitFiles.truncated }
-    : walkProjectFiles(root, maxDepth, maxDirectories, warnings);
+    : walkProjectFiles(root, maxDepth, maxDirectories, maxFiles, maxEntries, warnings);
   if (gitFiles) warnings.push(...gitFiles.warnings);
   const { files, scannedDirectories, truncated } = inventory;
+  const evidence: ProjectObservedEvidence[] = [];
   for (const relative of files) {
     const ecosystem = ecosystemForManifest(path.posix.basename(relative));
+    evidence.push({ sourcePath: relative, category: ecosystem ? "manifest" : "file", ecosystem: ecosystem ?? "unknown", confidence: "observed" });
     if (!ecosystem) continue;
     manifests.push({
       path: relative,
@@ -75,13 +94,14 @@ export function discoverProject(rootPath: string, options: ProjectDiscoveryOptio
     });
   }
   if (truncated && !warnings.some((warning) => warning.includes("safety limit"))) {
-    warnings.push(`Project discovery reached its maximum depth of ${maxDepth} or directory limit of ${maxDirectories}; deeper paths were not inspected.`);
+    warnings.push(`Project discovery reached its maximum depth of ${maxDepth}, directory limit of ${maxDirectories}, file limit of ${maxFiles}, or entry limit of ${maxEntries}; some paths were not inspected.`);
   }
   manifests.sort((left, right) => left.path.localeCompare(right.path));
   return {
     root,
     files,
     manifests,
+    evidence,
     ecosystems: [...new Set(manifests.map((manifest) => manifest.ecosystem))].sort(),
     scannedDirectories,
     truncated,
@@ -94,7 +114,7 @@ export function discoverProject(rootPath: string, options: ProjectDiscoveryOptio
  * boundary. This prevents ignored build output, fixtures and generated apps
  * from being treated as projects to provision. Non-Git folders remain usable.
  */
-function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: number): {
+function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: number, maxFiles: number, maxEntries: number): {
   files: string[];
   scannedDirectories: number;
   truncated: boolean;
@@ -122,10 +142,22 @@ function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: num
   const directories = new Set<string>(["."]);
   const files: string[] = [];
   let truncated = false;
-  for (const item of Buffer.from(listed.stdout).toString("utf8").split("\0")) {
-    if (!item || (prefix && !item.startsWith(prefix))) continue;
+  let fileLimitReached = false;
+  let entryLimitReached = false;
+  let inspectedEntries = 0;
+  const listedFiles = Buffer.from(listed.stdout).toString("utf8").split("\0")
+    .filter(Boolean)
+    .sort((left, right) => left.localeCompare(right));
+  for (const item of listedFiles) {
+    if (prefix && !item.startsWith(prefix)) continue;
     const relative = prefix ? item.slice(prefix.length) : item;
     if (!relative || relative.split("/").some((part) => IGNORED_DIRECTORIES.has(part.toLowerCase()))) continue;
+    if (inspectedEntries >= maxEntries) {
+      truncated = true;
+      entryLimitReached = true;
+      break;
+    }
+    inspectedEntries += 1;
     const parts = relative.split("/");
     const depth = parts.length - 1;
     if (depth > maxDepth) {
@@ -149,12 +181,21 @@ function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: num
     }
     if (directories.size >= maxDirectories && truncated) break;
     files.push(relative);
+    if (files.length > maxFiles) {
+      files.pop();
+      truncated = true;
+      fileLimitReached = true;
+      break;
+    }
   }
+  const warnings: string[] = [];
+  if (fileLimitReached) warnings.push(`Project discovery stopped at its ${maxFiles} file safety limit.`);
+  if (entryLimitReached) warnings.push(`Project discovery stopped at its ${maxEntries} Git file-entry safety limit.`);
   return {
     files: files.sort((left, right) => left.localeCompare(right)),
     scannedDirectories: directories.size,
     truncated,
-    warnings: []
+    warnings
   };
 }
 
@@ -172,6 +213,8 @@ function walkProjectFiles(
   root: string,
   maxDepth: number,
   maxDirectories: number,
+  maxFiles: number,
+  maxEntries: number,
   warnings: string[]
 ): { files: string[]; scannedDirectories: number; truncated: boolean } {
   const files: string[] = [];
@@ -180,6 +223,7 @@ function walkProjectFiles(
   ];
   let scannedDirectories = 0;
   let truncated = false;
+  let inspectedEntries = 0;
   while (stack.length > 0) {
     if (scannedDirectories >= maxDirectories) {
       truncated = true;
@@ -188,17 +232,45 @@ function walkProjectFiles(
     }
     const current = stack.pop()!;
     scannedDirectories += 1;
-    let entries: fs.Dirent[];
+    let directory: fs.Dir;
     try {
-      entries = fs.readdirSync(current.absolute, { withFileTypes: true })
-        .sort((left, right) => left.name.localeCompare(right.name));
+      directory = fs.opendirSync(current.absolute);
     } catch (error) {
       warnings.push(`Could not inspect ${current.relative}: ${error instanceof Error ? error.message : "unknown error"}`);
       continue;
     }
+    const entries: fs.Dirent[] = [];
+    let entryLimitReached = false;
+    try {
+      while (true) {
+        const entry = directory.readSync();
+        if (!entry) break;
+        if (inspectedEntries >= maxEntries) {
+          entryLimitReached = true;
+          break;
+        }
+        inspectedEntries += 1;
+        entries.push(entry);
+      }
+    } catch (error) {
+      directory.closeSync();
+      warnings.push(`Could not inspect ${current.relative}: ${error instanceof Error ? error.message : "unknown error"}`);
+      continue;
+    }
+    directory.closeSync();
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    if (entryLimitReached) {
+      truncated = true;
+      warnings.push(`Project discovery stopped at its ${maxEntries} directory-entry safety limit; entries follow filesystem enumeration order, with inspected entries processed lexically.`);
+    }
     for (const entry of entries) {
       const relative = current.relative === "." ? entry.name : `${current.relative}/${entry.name}`;
       if (entry.isFile()) {
+        if (files.length >= maxFiles) {
+          truncated = true;
+          warnings.push(`Project discovery stopped at its ${maxFiles} file safety limit.`);
+          return { files, scannedDirectories, truncated };
+        }
         files.push(relative);
         continue;
       }
@@ -209,6 +281,7 @@ function walkProjectFiles(
       }
       stack.push({ absolute: path.join(current.absolute, entry.name), relative, depth: current.depth + 1 });
     }
+    if (entryLimitReached) break;
   }
   return { files, scannedDirectories, truncated };
 }
