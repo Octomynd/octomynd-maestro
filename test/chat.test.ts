@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -15,6 +15,18 @@ import { ProjectProcessManager } from "../src/chat/project-process.js";
 import { planProjectStartCommand } from "../src/chat/project-command.js";
 import { compileOperationalChatContext } from "../src/chat/context-compiler.js";
 import { isRecoveryRequest } from "../src/chat/recovery.js";
+
+const { bootstrapOptionsSpy } = vi.hoisted(() => ({ bootstrapOptionsSpy: vi.fn() }));
+vi.mock("../src/git.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/git.js")>();
+  return {
+    ...actual,
+    bootstrapEmptyRepository: (...args: Parameters<typeof actual.bootstrapEmptyRepository>) => {
+      bootstrapOptionsSpy(args[2]);
+      return actual.bootstrapEmptyRepository(...args);
+    }
+  };
+});
 
 describe("Unified Operational Chat (Task #52)", () => {
   let tmpDir: string;
@@ -977,13 +989,18 @@ describe("Unified Operational Chat (Task #52)", () => {
       .toBeNull();
   });
 
-  it("creates and registers a project requested explicitly from chat", async () => {
+  it.each(["dashboard", "telegram"] as const)("creates a local bootstrap commit without publishing a chat-created project via %s", async (surface) => {
+    const remotePath = path.join(tmpDir, `finance-${surface}.git`);
     const projectPath = path.join(tmpDir, "new-project");
     fs.mkdirSync(projectPath);
+    expect(runGit(["init", "--bare", remotePath], tmpDir).ok).toBe(true);
+    expect(runGit(["init", "-b", "main"], projectPath).ok).toBe(true);
+    expect(runGit(["remote", "add", "origin", remotePath], projectPath).ok).toBe(true);
     const chatService = new OperationalChatService({ database, worktreesRoot: tmpDir });
+    bootstrapOptionsSpy.mockClear();
     const response = await chatService.ask({
       projectKey: "maestro",
-      surface: "dashboard",
+      surface,
       accessMode: "standard",
       message: `Crie um projeto chamado finance em ${projectPath}`
     });
@@ -992,14 +1009,18 @@ describe("Unified Operational Chat (Task #52)", () => {
     expect(action).toBeDefined();
     const result = await chatService.executeAction({
       projectKey: "maestro",
-      surface: "dashboard",
+      surface,
       accessMode: "standard",
       action: action!
     });
 
     expect(result.success).toBe(true);
+    expect(result.resultSummary).toContain("no branch was published");
     expect(database.findProjectByKey("finance")?.path).toBe(projectPath);
     expect(database.listOperationalChatMemories("finance").some((memory) => memory.text.includes("finance"))).toBe(true);
+    expect(runGit(["rev-parse", "--verify", "HEAD"], projectPath).ok).toBe(true);
+    expect(runGit(["for-each-ref", "--format=%(refname)"], remotePath).stdout.trim()).toBe("");
+    expect(bootstrapOptionsSpy).toHaveBeenCalledWith({ push: false });
   });
 
   it("creates an explicitly requested task directly in Full Access", async () => {
