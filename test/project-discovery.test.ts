@@ -105,6 +105,26 @@ describe("discoverProject", () => {
     expect(exceeded.warnings.join(" ")).toContain("2 file safety limit");
   });
 
+  it("applies the entry limit to Git-visible inventories", () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-project-discovery-git-entry-limit-"));
+    const git = (args: string[]) => {
+      const result = spawnSync("git", ["-C", tempDir!, ...args], { encoding: "utf8", windowsHide: true });
+      if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+    };
+    git(["init", "-b", "main"]);
+    for (const name of ["alpha.bin", "beta.bin", "gamma.bin"]) fs.writeFileSync(path.join(tempDir, name), "", "utf8");
+    git(["add", "alpha.bin", "beta.bin", "gamma.bin"]);
+
+    const exact = discoverProject(tempDir, { maxEntries: 3 });
+    expect(exact.files).toEqual(["alpha.bin", "beta.bin", "gamma.bin"]);
+    expect(exact.truncated).toBe(false);
+
+    const exceeded = discoverProject(tempDir, { maxEntries: 2 });
+    expect(exceeded.files).toEqual(["alpha.bin", "beta.bin"]);
+    expect(exceeded.truncated).toBe(true);
+    expect(exceeded.warnings.join(" ")).toContain("2 Git file-entry safety limit");
+  });
+
   it("bounds traversal and reports when the project inventory is incomplete", () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-project-discovery-"));
     fs.mkdirSync(path.join(tempDir, "level-one", "level-two"), { recursive: true });

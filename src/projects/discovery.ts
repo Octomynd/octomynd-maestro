@@ -48,7 +48,7 @@ export type ProjectDiscoveryOptions = {
   maxDirectories?: number;
   /** Maximum files returned; defaults to 50,000. */
   maxFiles?: number;
-  /** Maximum directory entries inspected; defaults to 100,000. */
+  /** Maximum filesystem entries inspected; Git inventories count visible file entries. Defaults to 100,000. */
   maxEntries?: number;
 };
 
@@ -75,7 +75,7 @@ export function discoverProject(rootPath: string, options: ProjectDiscoveryOptio
   const maxEntries = positiveInteger(options.maxEntries, DEFAULT_MAX_ENTRIES);
   const manifests: ProjectManifestEvidence[] = [];
   const warnings: string[] = [];
-  const gitFiles = listGitVisibleFiles(root, maxDepth, maxDirectories, maxFiles);
+  const gitFiles = listGitVisibleFiles(root, maxDepth, maxDirectories, maxFiles, maxEntries);
   const inventory = gitFiles
     ? { files: gitFiles.files, scannedDirectories: gitFiles.scannedDirectories, truncated: gitFiles.truncated }
     : walkProjectFiles(root, maxDepth, maxDirectories, maxFiles, maxEntries, warnings);
@@ -114,7 +114,7 @@ export function discoverProject(rootPath: string, options: ProjectDiscoveryOptio
  * boundary. This prevents ignored build output, fixtures and generated apps
  * from being treated as projects to provision. Non-Git folders remain usable.
  */
-function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: number, maxFiles: number): {
+function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: number, maxFiles: number, maxEntries: number): {
   files: string[];
   scannedDirectories: number;
   truncated: boolean;
@@ -143,6 +143,8 @@ function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: num
   const files: string[] = [];
   let truncated = false;
   let fileLimitReached = false;
+  let entryLimitReached = false;
+  let inspectedEntries = 0;
   const listedFiles = Buffer.from(listed.stdout).toString("utf8").split("\0")
     .filter(Boolean)
     .sort((left, right) => left.localeCompare(right));
@@ -150,6 +152,12 @@ function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: num
     if (prefix && !item.startsWith(prefix)) continue;
     const relative = prefix ? item.slice(prefix.length) : item;
     if (!relative || relative.split("/").some((part) => IGNORED_DIRECTORIES.has(part.toLowerCase()))) continue;
+    if (inspectedEntries >= maxEntries) {
+      truncated = true;
+      entryLimitReached = true;
+      break;
+    }
+    inspectedEntries += 1;
     const parts = relative.split("/");
     const depth = parts.length - 1;
     if (depth > maxDepth) {
@@ -180,11 +188,14 @@ function listGitVisibleFiles(root: string, maxDepth: number, maxDirectories: num
       break;
     }
   }
+  const warnings: string[] = [];
+  if (fileLimitReached) warnings.push(`Project discovery stopped at its ${maxFiles} file safety limit.`);
+  if (entryLimitReached) warnings.push(`Project discovery stopped at its ${maxEntries} Git file-entry safety limit.`);
   return {
     files: files.sort((left, right) => left.localeCompare(right)),
     scannedDirectories: directories.size,
     truncated,
-    warnings: fileLimitReached ? [`Project discovery stopped at its ${maxFiles} file safety limit.`] : []
+    warnings
   };
 }
 
