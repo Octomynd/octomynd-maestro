@@ -18,6 +18,7 @@ describe("discoverProject", () => {
     const files = [
       "odd/place/service/package.json",
       "odd/place/service/requirements-prod.txt",
+      "odd/place/service/mystery.input",
       "mobile/ios/Cargo.toml",
       "tools/worker/go.mod",
       "desktop/native/Octomynd.csproj",
@@ -42,7 +43,86 @@ describe("discoverProject", () => {
     expect(discovery.ecosystems).toEqual(["dotnet", "go", "node", "python", "rust"]);
     expect(discovery.manifests.find((manifest) => manifest.path === "odd/place/service/package.json"))
       .toMatchObject({ directory: "odd/place/service", ecosystem: "node" });
+    expect(discovery.evidence.find((item) => item.sourcePath === "odd/place/service/package.json"))
+      .toMatchObject({ category: "manifest", ecosystem: "node", confidence: "observed" });
+    expect(discovery.evidence.find((item) => item.sourcePath === "odd/place/service/mystery.input"))
+      .toMatchObject({ category: "file", ecosystem: "unknown", confidence: "observed" });
     expect(discovery.truncated).toBe(false);
+  });
+
+  it("marks the file limit only when an eligible file is omitted", () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-project-discovery-file-limit-"));
+    fs.writeFileSync(path.join(tempDir, "alpha.bin"), "", "utf8");
+    fs.writeFileSync(path.join(tempDir, "beta.bin"), "", "utf8");
+
+    const exact = discoverProject(tempDir, { maxFiles: 2 });
+    expect(exact.files).toEqual(["alpha.bin", "beta.bin"]);
+    expect(exact.truncated).toBe(false);
+    expect(exact.warnings).toEqual([]);
+
+    fs.writeFileSync(path.join(tempDir, "gamma.bin"), "", "utf8");
+    const exceeded = discoverProject(tempDir, { maxFiles: 2 });
+    expect(exceeded.files).toEqual(["alpha.bin", "beta.bin"]);
+    expect(exceeded.truncated).toBe(true);
+    expect(exceeded.warnings.join(" ")).toContain("2 file safety limit");
+  });
+
+  it("bounds non-Git directory enumeration and reports only an exceeded entry cap", () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-project-discovery-entry-limit-"));
+    fs.writeFileSync(path.join(tempDir, "alpha.bin"), "", "utf8");
+    fs.writeFileSync(path.join(tempDir, "beta.bin"), "", "utf8");
+
+    const exact = discoverProject(tempDir, { maxEntries: 2 });
+    expect(exact.truncated).toBe(false);
+    expect(exact.files).toHaveLength(2);
+
+    fs.writeFileSync(path.join(tempDir, "gamma.bin"), "", "utf8");
+    const exceeded = discoverProject(tempDir, { maxEntries: 2 });
+    expect(exceeded.truncated).toBe(true);
+    expect(exceeded.files).toHaveLength(2);
+    expect(exceeded.files).toEqual([...exceeded.files].sort((left, right) => left.localeCompare(right)));
+    expect(exceeded.warnings.join(" ")).toContain("2 directory-entry safety limit");
+  });
+
+  it("applies the exact and exceeded file limits to Git-visible inventories", () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-project-discovery-git-limit-"));
+    const git = (args: string[]) => {
+      const result = spawnSync("git", ["-C", tempDir!, ...args], { encoding: "utf8", windowsHide: true });
+      if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+    };
+    git(["init", "-b", "main"]);
+    for (const name of ["alpha.bin", "beta.bin"]) fs.writeFileSync(path.join(tempDir, name), "", "utf8");
+    git(["add", "alpha.bin", "beta.bin"]);
+
+    const exact = discoverProject(tempDir, { maxFiles: 2 });
+    expect(exact.files).toEqual(["alpha.bin", "beta.bin"]);
+    expect(exact.truncated).toBe(false);
+
+    fs.writeFileSync(path.join(tempDir, "gamma.bin"), "", "utf8");
+    const exceeded = discoverProject(tempDir, { maxFiles: 2 });
+    expect(exceeded.files).toEqual(["alpha.bin", "beta.bin"]);
+    expect(exceeded.truncated).toBe(true);
+    expect(exceeded.warnings.join(" ")).toContain("2 file safety limit");
+  });
+
+  it("applies the entry limit to Git-visible inventories", () => {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-project-discovery-git-entry-limit-"));
+    const git = (args: string[]) => {
+      const result = spawnSync("git", ["-C", tempDir!, ...args], { encoding: "utf8", windowsHide: true });
+      if (result.status !== 0) throw new Error(result.stderr || result.stdout);
+    };
+    git(["init", "-b", "main"]);
+    for (const name of ["alpha.bin", "beta.bin", "gamma.bin"]) fs.writeFileSync(path.join(tempDir, name), "", "utf8");
+    git(["add", "alpha.bin", "beta.bin", "gamma.bin"]);
+
+    const exact = discoverProject(tempDir, { maxEntries: 3 });
+    expect(exact.files).toEqual(["alpha.bin", "beta.bin", "gamma.bin"]);
+    expect(exact.truncated).toBe(false);
+
+    const exceeded = discoverProject(tempDir, { maxEntries: 2 });
+    expect(exceeded.files).toEqual(["alpha.bin", "beta.bin"]);
+    expect(exceeded.truncated).toBe(true);
+    expect(exceeded.warnings.join(" ")).toContain("2 Git file-entry safety limit");
   });
 
   it("bounds traversal and reports when the project inventory is incomplete", () => {
