@@ -2,12 +2,37 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDatabase, MaestroDatabase } from "../src/db.js";
 import { detectGitDefaultBranch, hasAnyCommit } from "../src/git.js";
 import { ApplicationCommands } from "../src/commands/application-commands.js";
 import { ApplicationCommandError } from "../src/commands/errors.js";
 import { FeatureGitHubGateway, FeaturePullRequestState } from "../src/features/github.js";
+
+const { bootstrapOptionsSpy } = vi.hoisted(() => ({ bootstrapOptionsSpy: vi.fn() }));
+const { gitPushCalls } = vi.hoisted(() => ({ gitPushCalls: [] as string[][] }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    spawnSync: (command: string, args: readonly string[], options?: object) => {
+      if (command === "git" && args[0] === "push") {
+        gitPushCalls.push([...args]);
+      }
+      return actual.spawnSync(command, args, options);
+    }
+  };
+});
+vi.mock("../src/git.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/git.js")>();
+  return {
+    ...actual,
+    bootstrapEmptyRepository: (...args: Parameters<typeof actual.bootstrapEmptyRepository>) => {
+      bootstrapOptionsSpy(args[2]);
+      return actual.bootstrapEmptyRepository(...args);
+    }
+  };
+});
 
 function spawnGit(args: string[], cwd: string) {
   const result = spawnSync("git", args, { cwd, encoding: "utf8", windowsHide: true });
@@ -596,16 +621,24 @@ describe("ApplicationCommands Work Intake integration", () => {
 describe("ApplicationCommands.prepareTask on an empty repository", () => {
   it("bootstraps the initial commit and prepares the task instead of blocking", () => {
     const emptyDir = path.join(tempDir, "empty-project");
+    const bareRemote = path.join(tempDir, "empty-project-origin.git");
     fs.mkdirSync(emptyDir);
     runGit(["init", "-b", "main"], emptyDir);
+    runGit(["init", "--bare", bareRemote], tempDir);
+    runGit(["remote", "add", "origin", bareRemote], emptyDir);
     database.registerProject({ key: "empty-repo", name: "Empty Repo", path: emptyDir, defaultBranch: "main" });
 
     const task = commands.createTask({ channel: "dashboard" }, { text: "criar app de financas", projectKey: "empty-repo" });
 
+    bootstrapOptionsSpy.mockClear();
+    gitPushCalls.length = 0;
     const result = commands.prepareTask({ channel: "dashboard" }, task.id, path.join(tempDir, "worktrees"));
 
     expect(result.task.worktreePath).toBeTruthy();
     expect(hasAnyCommit(emptyDir)).toBe(true);
+    expect(bootstrapOptionsSpy).toHaveBeenCalledWith({ push: false });
+    expect(gitPushCalls).toEqual([]);
+    expect(spawnGit(["show-ref"], bareRemote).stdout).toBe("");
 
     const events = database.listEvents(50).filter((event) => event.type === "project.bootstrapped");
     expect(events.length).toBeGreaterThan(0);
