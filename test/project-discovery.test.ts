@@ -16,6 +16,7 @@ describe("discoverProject", () => {
   it("finds mixed project manifests at arbitrary paths without assigning meaning to folder names", () => {
     tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "maestro-project-discovery-"));
     const files = [
+      "pnpm-workspace.yaml",
       "odd/place/service/package.json",
       "odd/place/service/requirements-prod.txt",
       "odd/place/service/mystery.input",
@@ -28,7 +29,7 @@ describe("discoverProject", () => {
     for (const file of files) {
       const absolute = path.join(tempDir, file);
       fs.mkdirSync(path.dirname(absolute), { recursive: true });
-      fs.writeFileSync(absolute, "{}\n", "utf8");
+      fs.writeFileSync(absolute, file === "pnpm-workspace.yaml" ? "packages:\n  - odd/place/*\n" : "{}\n", "utf8");
     }
 
     const discovery = discoverProject(tempDir);
@@ -38,9 +39,12 @@ describe("discoverProject", () => {
       "mobile/ios/Cargo.toml",
       "odd/place/service/package.json",
       "odd/place/service/requirements-prod.txt",
+      "pnpm-workspace.yaml",
       "tools/worker/go.mod"
     ]);
     expect(discovery.ecosystems).toEqual(["dotnet", "go", "node", "python", "rust"]);
+    expect(discovery.manifests.find((manifest) => manifest.path === "pnpm-workspace.yaml"))
+      .toMatchObject({ directory: ".", ecosystem: "node" });
     expect(discovery.manifests.find((manifest) => manifest.path === "odd/place/service/package.json"))
       .toMatchObject({ directory: "odd/place/service", ecosystem: "node" });
     expect(discovery.evidence.find((item) => item.sourcePath === "odd/place/service/package.json"))
